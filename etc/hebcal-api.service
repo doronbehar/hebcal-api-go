@@ -14,7 +14,8 @@ ExecStart=/usr/local/bin/hebcal-api \
   -geonames-db /var/www/geonames.sqlite3 \
   -fonts /var/www/fonts \
   -pdf-max-concurrency 16
-# SIGUSR1 (or SIGHUP) reopens the access log after rotation
+# SIGUSR1 (or SIGHUP) reopens the access log after rotation and checks
+# geonames.sqlite3 for replacement (which -geonames-poll also does every 10m)
 ExecReload=/bin/kill -USR1 $MAINPID
 Restart=on-failure
 RestartSec=2

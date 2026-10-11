@@ -54,3 +54,43 @@ func TestFromLatLongTzidLeniency(t *testing.T) {
 		}
 	}
 }
+
+// TestTimezoneLookup pins the coordinate-to-timezone fallback for both
+// latitude/longitude forms when no tzid (or legacy tz/dst) is given, and that
+// a bad tzid or out-of-range coordinate is still rejected.
+func TestTimezoneLookup(t *testing.T) {
+	ok := []struct {
+		query, tzid string
+		il          bool
+	}{
+		{"latitude=40.71&longitude=-74.01", "America/New_York", false},
+		{"latitude=31.77&longitude=35.21", "Asia/Jerusalem", true},
+		{"latitude=0&longitude=-30", "Etc/GMT+2", false}, // open ocean
+		{"ladeg=51&lamin=30&ladir=n&lodeg=0&lomin=7&lodir=w", "Europe/London", false},
+		{"ladeg=33&lamin=52&ladir=s&lodeg=151&lomin=12&lodir=e", "Australia/Sydney", false},
+	}
+	for _, tc := range ok {
+		q, _ := url.ParseQuery(tc.query)
+		loc, err := FromQuery(nil, q)
+		if err != nil {
+			t.Errorf("%s: %v", tc.query, err)
+			continue
+		}
+		if loc.TimeZoneID != tc.tzid || loc.IL != tc.il {
+			t.Errorf("%s: tzid=%q il=%v, want %q %v", tc.query, loc.TimeZoneID, loc.IL, tc.tzid, tc.il)
+		}
+	}
+	bad := []string{
+		"latitude=40.71&longitude=-74.01&tzid=Nowhere/Fake",
+		"latitude=91&longitude=0",
+		"latitude=0&longitude=-181",
+		"ladeg=91&lamin=0&ladir=n&lodeg=0&lomin=0&lodir=e",
+		"ladeg=51&lamin=30&ladir=n&lodeg=0&lomin=7&lodir=w&tzid=Nowhere/Fake",
+	}
+	for _, query := range bad {
+		q, _ := url.ParseQuery(query)
+		if loc, err := FromQuery(nil, q); err == nil {
+			t.Errorf("%s: want error, got %+v", query, loc)
+		}
+	}
+}

@@ -1186,8 +1186,9 @@ choice. `eventOrder` ← `@hebcal/core`'s per-day emission order.
 `Service` flow ← `src/pdf.js` + `src/hebcal-download.js` run order. `Prepare` ←
 `src/hebcal-download.js` (decode → generate → learning fetch → empty check).
 empty-events 400 ← `src/hebcal-download.js`. `decodeRequest` 404 default ←
-hebcal-web download router. `DecodeError` bingbot-404 ← `app-download.js`
-`isBingBot` special case (part of `fixup2`'s `/v4/` handling). `CalendarTitle`
+hebcal-web download router. The undecodable-payload 404 generalizes
+`app-download.js`'s `isBingBot` special case (part of `fixup2`'s `/v4/`
+handling) to every user agent -- a **deliberate divergence**. `CalendarTitle`
 / `calendarTitle` ← `getCalendarTitle()` (`@hebcal/rest-api`). `CampaignName` /
 `campaignFromTitle` ← `campaignName()` (`src/hebcal-download.js`), with
 `preferAsciiName` + `shortLocationName()`/`getShortName()`. `campaignFor` ←
@@ -1241,8 +1242,7 @@ suffix ← `applyIsraelSuffix` (newer spelling of `?i=on`).
 `pdfDownload` headers ← `src/app-download.js`'s 14-day `cacheControl` + the
 `.pdf` branch of `src/hebcal-download.js`. `pdfHoliday` headers ←
 `holidayPdf.js` (60-day cache, no CORS, nosniff, cache set after URL accepted).
-`bingUA` / `isBingBot` ← `app-download.js` `fixup2`'s UA check for
-`compatible; bingbot/2.`. `writeDownloadError` ← hebcal-web's status mapping;
+`writeDownloadError` ← hebcal-web's status mapping;
 the 404-drops-Cache-Control is a **deliberate divergence**. `writeHolidayError`
 ← `holidayPdf.js`'s three throws. `writeCommonPDFError` ←
 `getLocationFromQuery`'s 404/400 split.
@@ -1390,9 +1390,13 @@ of the Hebcal.com fleet's.
 (no GeoIP, no `ladeg`/`lamin` here — those live in `pdf/v2.go`). `geoposLegacy`
 ← `src/urlArgs.js`. `fromLatLongLegacy` ← the `hasLatLongLegacy` branch.
 `legacyTzToTzid` ← `@hebcal/core` `Location.legacyTzToTzid`. `makeGeoCityName` ←
-the `37°25′N 122°5′W America/Los_Angeles` name. The missing geo-tz shape
-fallback (a required-tzid 400 instead) ← hebcal-web guesses the tz from geo-tz
-shape data, which this service does not ship. `render.go` `ToGeoJSON` ← Koa's
+the `37°25′N 122°5′W America/Los_Angeles` name. `tz.go` `TimezoneAt` ←
+hebcal-web's geo-tz shape lookup when a lat/long names no tzid, done here with
+`github.com/ringsaturn/tzf/v2` (`NewDefaultFinder`, built lazily); both
+lat/long forms and the PDF `geoPos` branch in `params.go` use it, and the
+"Timezone required" 400 is left only for a lookup that finds nothing. The two
+polygon datasets can disagree near a border or offshore (tzf answers open
+ocean with `Etc/GMT±N`). `render.go` `ToGeoJSON` ← Koa's
 serialization of an `@hebcal/core` `Location` + `@hebcal/geo-sqlite`
 `makeGeonameLocation`'s own-property order. `ToPlainObj` ← `@hebcal/rest-api`
 `locationToPlainObj`.

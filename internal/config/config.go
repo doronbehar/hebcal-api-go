@@ -20,6 +20,10 @@ const (
 	DefaultZipsDB     = "zips.sqlite3"
 	DefaultGeonamesDB = "geonames.sqlite3"
 	DefaultFontDir    = "fonts"
+	// DefaultGeonamesPoll is how often the geonames database file is checked
+	// for replacement. A check is one stat(2); the file is rebuilt weekly and
+	// nothing needs the new rows within minutes.
+	DefaultGeonamesPoll = 10 * time.Minute
 	// DefaultPDFMaxConcurrency caps how many PDF calendars render at once. An
 	// unbounded flood grows the heap past physical RAM and the box swaps, which
 	// is what turned 50ms requests into the 10-25s durations seen in production.
@@ -50,6 +54,10 @@ type Config struct {
 	// ZipsDB and GeonamesDB are the SQLite databases behind the location APIs.
 	ZipsDB     string
 	GeonamesDB string
+	// GeonamesPoll is how often GeonamesDB is checked for an atomic
+	// replacement and reopened if one is found. Zero disables polling; a
+	// SIGHUP or SIGUSR1 still triggers a check.
+	GeonamesPoll time.Duration
 	// GeoIPSocket is the unix domain socket of the geoip2 service.
 	GeoIPSocket string
 	// ReadingsSocket is the unix domain socket of the readings-svc sidecar,
@@ -89,6 +97,8 @@ func Load() *Config {
 		"path to the zips SQLite database (for the /zmanim API)")
 	flag.StringVar(&cfg.GeonamesDB, "geonames-db", envOr("GEONAMES_DB", DefaultGeonamesDB),
 		"path to the geonames SQLite database (for the /zmanim API)")
+	flag.DurationVar(&cfg.GeonamesPoll, "geonames-poll", DefaultGeonamesPoll,
+		"how often to check the geonames database for replacement and reopen it (0 disables; SIGHUP also checks)")
 	flag.StringVar(&cfg.GeoIPSocket, "socket", geoip.DefaultSocket,
 		"path to the GeoIP unix domain socket")
 	flag.StringVar(&cfg.ReadingsSocket, "readings-socket",

@@ -31,7 +31,7 @@ func (s *Server) pdfDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	cal, err := s.PDF.Prepare(r.Context(), r.URL)
 	if err != nil {
-		writeDownloadError(w, err, r)
+		writeDownloadError(w, err)
 		return
 	}
 
@@ -97,16 +97,6 @@ func (s *Server) pdfHoliday(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// bingUA is the substring the User-Agent header is checked for
-// (`compatible; bingbot/2.`), rather than the whole "bingbot" token, so it
-// can't also catch some future unrelated crawler that merely mentions bing.
-const bingUA = "compatible; bingbot/2."
-
-// isBingBot reports whether the request's User-Agent identifies bingbot.
-func isBingBot(r *http.Request) bool {
-	return strings.Contains(r.Header.Get("User-Agent"), bingUA)
-}
-
 // pdfMethodAllowed rejects the methods a calendar has no answer for.
 func pdfMethodAllowed(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -160,24 +150,16 @@ func (s *Server) writePDF(w http.ResponseWriter, cal *pdf.Calendar) {
 // added later, so pinning the 404 in Varnish for two weeks is worse than a
 // cache miss. pdfDownload sets the header only after this function has returned
 // without writing, so a 410 sets its own and nothing else carries one.
-func writeDownloadError(w http.ResponseWriter, err error, r *http.Request) {
+func writeDownloadError(w http.ResponseWriter, err error) {
 	// Record the underlying error (not the possibly-terser body some cases
 	// write) for the access log's "msg" field.
 	httpx.RecordError(w, err)
 	var oor *pdf.OutOfRangeError
 	var unsup *pdf.UnsupportedSeriesError
-	var decErr *pdf.DecodeError
 	switch {
 	case errors.As(err, &oor):
 		w.Header().Set("Cache-Control", httpx.CacheControl14Days)
 		http.Error(w, oor.Error(), http.StatusGone)
-	case errors.As(err, &decErr) && isBingBot(r):
-		// bingbot fetches /v4/ URLs with the path lowercased, which fails
-		// base64-decode or protobuf-unmarshal every time; this case is answered
-		// 404 rather than 400 (see pdf.DecodeError). Every other malformed /v4/
-		// request -- from any other user agent -- keeps falling through to
-		// writeCommonPDFError's 400 below.
-		http.Error(w, "Not Found", http.StatusNotFound)
 	case errors.As(err, &unsup):
 		// Several daily-learning series have no Go schedule, and their rows
 		// come from the readings-svc sidecar rather than the calendar being

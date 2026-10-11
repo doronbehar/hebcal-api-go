@@ -186,23 +186,15 @@ func decodeRequest(u *url.URL) (*downloadpb.Download, error) {
 		}
 		msg, err := DecodeMessage(payload)
 		if err != nil {
-			return nil, &DecodeError{Err: err}
+			// Several crawlers (bingbot among them) fetch /v4/ URLs with the
+			// path lowercased, which breaks the mixed-case base64 and the
+			// protobuf it decodes to. An undecodable payload names no
+			// calendar, so it is 404, the same as an unparseable path.
+			return nil, NotFoundf("%s", err.Error())
 		}
 		return msg, nil
 	}
 }
-
-// DecodeError wraps a failure to base64-decode or protobuf-unmarshal a /v4/
-// URL's payload. It is otherwise just a 400, but the handler special-cases it
-// for bingbot: bingbot crawls /v4/ URLs with the path lowercased, which breaks
-// both the base64 alphabet (mixed-case) and the protobuf it decodes to, so
-// every one of its requests hits this branch. Those are answered 404 rather
-// than 400 for that one user agent, on the theory that a crawler told "not
-// found" backs off where one told "bad request" does not.
-type DecodeError struct{ Err error }
-
-func (e *DecodeError) Error() string { return e.Err.Error() }
-func (e *DecodeError) Unwrap() error { return e.Err }
 
 // CalendarTitle builds the document title, e.g. "Hebcal Palo Alto 2028",
 // "Hebcal Diaspora August 2026" or "Hebcal Palo Alto 2026-2027".

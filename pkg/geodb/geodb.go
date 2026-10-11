@@ -15,7 +15,11 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"unicode"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -44,19 +48,39 @@ FROM ZIPCodes_Primary WHERE ZipCode = ?`
 
 // DB wraps the geonames and zips SQLite databases with prepared statements
 // and small LRU caches.
+//
+// The geonames database can be replaced while the server runs (see
+// ReloadGeonames): everything read from it -- the handle, its statements, its
+// cache and the country names -- lives in one immutable geonames value behind
+// an atomic pointer, so a request works against a single generation from start
+// to finish and never sees a cache filled from the old file beside a statement
+// on the new one.
 type DB struct {
-	geonamesDB      *sql.DB
+	geonamesPath    string
+	geo             atomic.Pointer[geonames]
+	reloadMu        sync.Mutex // serializes ReloadGeonames
 	zipsDB          *sql.DB
-	geonameStmt     *sql.Stmt
 	zipStmt         *sql.Stmt
-	geonameCompStmt *sql.Stmt // geoname full-text autocomplete (FTS5)
 	zipCompStmt     *sql.Stmt // ZIP prefix autocomplete
 	zipFulltextStmt *sql.Stmt // ZIP city full-text autocomplete (FTS5)
-	geonameCache    *lru.Cache[int, *Location]
 	zipCache        *lru.Cache[string, *Location]
 	legacyCities    map[string]int
-	countryNames    map[string]string // ISO country code -> full country name
 }
+
+// geonames is one opened generation of geonames.sqlite3.
+type geonames struct {
+	db           *sql.DB
+	stmt         *sql.Stmt
+	compStmt     *sql.Stmt // geoname full-text autocomplete (FTS5)
+	cache        *lru.Cache[int, *Location]
+	countryNames map[string]string // ISO country code -> full country name
+	info         os.FileInfo       // the file as it was when opened
+}
+
+// retireDelay is how long a replaced geonames generation stays open. A request
+// that loaded the old pointer just before the swap finishes against it; 30s
+// is the server's WriteTimeout, so nothing still holds it after this.
+const retireDelay = time.Minute
 
 // New opens the zips and geonames databases read-only and prepares the
 // per-id lookup statements. The caller must Close the returned DB.
@@ -65,23 +89,16 @@ func New(zipsPath, geonamesPath string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", zipsPath, err)
 	}
-	geonamesDB, err := sql.Open("sqlite3", "file:"+geonamesPath+"?mode=ro&immutable=1")
+	db := &DB{geonamesPath: geonamesPath, zipsDB: zipsDB}
+	g, err := openGeonames(geonamesPath)
 	if err != nil {
-		zipsDB.Close()
-		return nil, fmt.Errorf("opening %s: %w", geonamesPath, err)
-	}
-	db := &DB{geonamesDB: geonamesDB, zipsDB: zipsDB}
-	if db.geonameStmt, err = geonamesDB.Prepare(geonameSQL); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("preparing geoname query: %w", err)
+		return nil, err
 	}
+	db.geo.Store(g)
 	if db.zipStmt, err = zipsDB.Prepare(zipSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("preparing zip query: %w", err)
-	}
-	if db.geonameCompStmt, err = geonamesDB.Prepare(geonameCompleteSQL); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("preparing geoname autocomplete query: %w", err)
 	}
 	if db.zipCompStmt, err = zipsDB.Prepare(zipCompleteSQL); err != nil {
 		db.Close()
@@ -91,7 +108,6 @@ func New(zipsPath, geonamesPath string) (*DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("preparing zip full-text autocomplete query: %w", err)
 	}
-	db.geonameCache, _ = lru.New[int, *Location](750)
 	db.zipCache, _ = lru.New[string, *Location](150)
 
 	var raw map[string]int
@@ -103,48 +119,109 @@ func New(zipsPath, geonamesPath string) (*DB, error) {
 	for name, id := range raw {
 		db.legacyCities[munge(name)] = id
 	}
+	return db, nil
+}
 
-	if err := db.loadCountryNames(); err != nil {
-		db.Close()
+// openGeonames opens path read-only, prepares its statements and loads the
+// country names. The file is stat'ed first, so a file replaced between the
+// stat and the open is merely noticed again on the next check.
+func openGeonames(path string) (*geonames, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	sdb, err := sql.Open("sqlite3", "file:"+path+"?mode=ro&immutable=1")
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	g := &geonames{db: sdb, info: info}
+	if g.stmt, err = sdb.Prepare(geonameSQL); err != nil {
+		g.close()
+		return nil, fmt.Errorf("preparing geoname query: %w", err)
+	}
+	if g.compStmt, err = sdb.Prepare(geonameCompleteSQL); err != nil {
+		g.close()
+		return nil, fmt.Errorf("preparing geoname autocomplete query: %w", err)
+	}
+	g.cache, _ = lru.New[int, *Location](750)
+	if err := g.loadCountryNames(); err != nil {
+		g.close()
 		return nil, err
 	}
-	return db, nil
+	return g, nil
 }
 
 // loadCountryNames reads the ISO country code -> full name mapping from the
 // geonames "country" table. This is the same table joined by geonameSQL, so the
 // names returned in the API's "location" object stay consistent with the city
-// display names.
-func (db *DB) loadCountryNames() error {
-	rows, err := db.geonamesDB.Query("SELECT ISO, Country FROM country WHERE Country <> ''")
+// display names. An empty table is an error: it means a truncated or wrong
+// file, which must not replace a working one.
+func (g *geonames) loadCountryNames() error {
+	rows, err := g.db.Query("SELECT ISO, Country FROM country WHERE Country <> ''")
 	if err != nil {
 		return fmt.Errorf("querying country names: %w", err)
 	}
 	defer rows.Close()
-	db.countryNames = make(map[string]string, 256)
+	g.countryNames = make(map[string]string, 256)
 	for rows.Next() {
 		var iso, country string
 		if err := rows.Scan(&iso, &country); err != nil {
 			return fmt.Errorf("scanning country names: %w", err)
 		}
-		db.countryNames[iso] = country
+		g.countryNames[iso] = country
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("reading country names: %w", err)
 	}
+	if len(g.countryNames) == 0 {
+		return fmt.Errorf("geonames database has no country names")
+	}
 	return nil
+}
+
+func (g *geonames) close() error {
+	if g.stmt != nil {
+		g.stmt.Close()
+	}
+	if g.compStmt != nil {
+		g.compStmt.Close()
+	}
+	return g.db.Close()
+}
+
+// ReloadGeonames reopens the geonames database if the file at its path has
+// been replaced since it was opened -- a different inode (the atomic rename a
+// rebuild ends with), a different modification time, or a different size --
+// and reports whether it did. Requests in flight finish against the old
+// generation, which is closed a minute later.
+//
+// A file that cannot be opened, prepared or read leaves the current
+// generation serving and returns the error; the next call tries again.
+func (db *DB) ReloadGeonames() (bool, error) {
+	db.reloadMu.Lock()
+	defer db.reloadMu.Unlock()
+	old := db.geo.Load()
+	info, err := os.Stat(db.geonamesPath)
+	if err != nil {
+		return false, fmt.Errorf("checking %s: %w", db.geonamesPath, err)
+	}
+	if os.SameFile(old.info, info) && info.ModTime().Equal(old.info.ModTime()) &&
+		info.Size() == old.info.Size() {
+		return false, nil
+	}
+	g, err := openGeonames(db.geonamesPath)
+	if err != nil {
+		return false, err
+	}
+	db.geo.Store(g)
+	time.AfterFunc(retireDelay, func() { old.close() })
+	return true, nil
 }
 
 // Close releases the prepared statements and database handles.
 func (db *DB) Close() error {
-	if db.geonameStmt != nil {
-		db.geonameStmt.Close()
-	}
 	if db.zipStmt != nil {
 		db.zipStmt.Close()
-	}
-	if db.geonameCompStmt != nil {
-		db.geonameCompStmt.Close()
 	}
 	if db.zipCompStmt != nil {
 		db.zipCompStmt.Close()
@@ -153,8 +230,8 @@ func (db *DB) Close() error {
 		db.zipFulltextStmt.Close()
 	}
 	var err error
-	if db.geonamesDB != nil {
-		err = db.geonamesDB.Close()
+	if g := db.geo.Load(); g != nil {
+		err = g.close()
 	}
 	if db.zipsDB != nil {
 		if e := db.zipsDB.Close(); err == nil {
@@ -167,23 +244,27 @@ func (db *DB) Close() error {
 // LookupGeoname returns the location for a GeoNames numeric id, or nil if it is
 // not present.
 func (db *DB) LookupGeoname(geonameid int) *Location {
+	return db.geo.Load().lookup(geonameid)
+}
+
+func (g *geonames) lookup(geonameid int) *Location {
 	if geonameid == 0 {
 		return nil
 	}
 	if geonameid == 293396 { // legacy alias fixup
 		geonameid = 293397
 	}
-	if loc, ok := db.geonameCache.Get(geonameid); ok {
+	if loc, ok := g.cache.Get(geonameid); ok {
 		return loc
 	}
 	var name, asciiname, cc, timezone string
 	var country, admin1 sql.NullString
 	var latitude, longitude float64
 	var population, gtopo30 sql.NullInt64
-	err := db.geonameStmt.QueryRow(geonameid).Scan(&name, &asciiname, &cc, &country,
+	err := g.stmt.QueryRow(geonameid).Scan(&name, &asciiname, &cc, &country,
 		&admin1, &latitude, &longitude, &population, &gtopo30, &timezone)
 	if err != nil {
-		db.geonameCache.Add(geonameid, nil)
+		g.cache.Add(geonameid, nil)
 		return nil
 	}
 	elevation := 0
@@ -208,7 +289,7 @@ func (db *DB) LookupGeoname(geonameid int) *Location {
 	if population.Valid {
 		loc.Population = int(population.Int64)
 	}
-	db.geonameCache.Add(geonameid, loc)
+	g.cache.Add(geonameid, loc)
 	return loc
 }
 
@@ -269,7 +350,7 @@ func (db *DB) LookupLegacyCity(cityName string) *Location {
 			Name:       classic.Name,
 			Asciiname:  classic.Name,
 			CC:         classic.CountryCode,
-			Country:    db.countryNames[classic.CountryCode],
+			Country:    db.CountryName(classic.CountryCode),
 			Latitude:   classic.Latitude,
 			Longitude:  classic.Longitude,
 			Elevation:  classic.Elevation,
@@ -283,7 +364,7 @@ func (db *DB) LookupLegacyCity(cityName string) *Location {
 // CountryName returns the full country name for an ISO country code, or the
 // empty string when the code is unknown.
 func (db *DB) CountryName(cc string) string {
-	return db.countryNames[cc]
+	return db.geo.Load().countryNames[cc]
 }
 
 // geonameCityDescr builds a display name from geonames components.

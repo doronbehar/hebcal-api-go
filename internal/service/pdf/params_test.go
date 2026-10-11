@@ -226,15 +226,38 @@ func TestGeoPosLocation(t *testing.T) {
 	}
 }
 
-// A lat/long location without a timezone cannot be turned into clock times.
-func TestGeoPosWithoutTzidIsRejected(t *testing.T) {
+// A lat/long location without a timezone takes the one its coordinates fall in.
+func TestGeoPosWithoutTzidLooksItUp(t *testing.T) {
 	msg := &pb.Download{
 		Candlelighting: true, GeoPos: true, Year: 2026,
 		LatOneof:  &pb.Download_Latitude{Latitude: 37.44},
 		LongOneof: &pb.Download_Longitude{Longitude: -122.14},
 	}
-	if _, err := DecodeParams(encode(t, msg), nil); err == nil {
-		t.Error("expected an error for a geoPos location with no tzid")
+	p, err := DecodeParams(encode(t, msg), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Opts.Location.TimeZoneId; got != "America/Los_Angeles" {
+		t.Errorf("tzid = %q, want America/Los_Angeles", got)
+	}
+}
+
+// Looked-up Asia/Jerusalem makes the location an Israel one, as a given one does.
+func TestGeoPosWithoutTzidInIsrael(t *testing.T) {
+	msg := &pb.Download{
+		Candlelighting: true, GeoPos: true, Year: 2026,
+		LatOneof:  &pb.Download_Latitude{Latitude: 32.08},
+		LongOneof: &pb.Download_Longitude{Longitude: 34.78},
+	}
+	p, err := DecodeParams(encode(t, msg), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Opts.Location.TimeZoneId; got != "Asia/Jerusalem" {
+		t.Errorf("tzid = %q, want Asia/Jerusalem", got)
+	}
+	if !p.Opts.IL {
+		t.Error("IL = false, want true")
 	}
 }
 

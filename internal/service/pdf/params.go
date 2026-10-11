@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/hebcal/hebcal-api-go/internal/model"
+	"github.com/hebcal/hebcal-api-go/internal/service/location"
 	"github.com/hebcal/hebcal-api-go/pkg/downloadpb"
 	"github.com/hebcal/hebcal-api-go/pkg/geodb"
 )
@@ -537,7 +538,11 @@ func applyLocation(msg *downloadpb.Download, p *Params, db *geodb.DB) error {
 		}
 		tzid := msg.GetTzid()
 		if tzid == "" {
-			return errors.New("geoPos location without tzid")
+			// No timezone given: look it up from the coordinates.
+			tzid = location.TimezoneAt(lat, long)
+			if tzid == "" {
+				return errors.New("geoPos location without tzid")
+			}
 		}
 		// Validate the timezone before it reaches the generator: zmanim.New
 		// panics if the tzid cannot be loaded, and IANA names are case-sensitive,

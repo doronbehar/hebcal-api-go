@@ -321,7 +321,7 @@ func TestZmanimErrors(t *testing.T) {
 		{"/zmanim?cfg=json&geonameid=99999999", 404},               // unknown geonameid
 		{"/zmanim?cfg=json&zip=00000", 404},                        // unknown zip
 		{"/zmanim?cfg=json&latitude=99&longitude=0&tzid=UTC", 400}, // bad latitude
-		{"/zmanim?cfg=json&latitude=40&longitude=-74", 400},        // tzid required
+		{"/zmanim?cfg=json&latitude=40&longitude=0&tzid=Fake", 400}, // bad tzid
 	}
 	for _, tc := range cases {
 		resp, body := get(t, srv, tc.path)
@@ -393,5 +393,18 @@ func TestZmanimOrderedOutput(t *testing.T) {
 	if !(strings.Index(sub, `"chatzotNight"`) < strings.Index(sub, `"sunrise"`) &&
 		strings.Index(sub, `"sunrise"`) < strings.Index(sub, `"sunset"`)) {
 		t.Errorf("times not in expected order: %s", sub)
+	}
+}
+
+// TestZmanimTimezoneLookup: a latitude/longitude with no tzid takes the
+// timezone its coordinates fall in rather than answering 400.
+func TestZmanimTimezoneLookup(t *testing.T) {
+	srv := testServerWithDB(t)
+	resp, body := get(t, srv, "/zmanim?cfg=json&latitude=40&longitude=-74&date=2026-10-10")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `"tzid":"America/New_York"`) {
+		t.Errorf("expected America/New_York in %s", body)
 	}
 }

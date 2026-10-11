@@ -224,7 +224,8 @@ func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 // combined bm25 relevance + population term), and resolves each hit to a full
 // location.
 func (db *DB) geonameFulltextComplete(match string) []Item {
-	rows, err := db.geonameCompStmt.Query(match)
+	g := db.geo.Load()
+	rows, err := g.compStmt.Query(match)
 	if err != nil {
 		return nil
 	}
@@ -242,25 +243,25 @@ func (db *DB) geonameFulltextComplete(match string) []Item {
 			continue
 		}
 		seen[geonameid] = true
-		loc := db.LookupGeoname(geonameid)
+		loc := g.lookup(geonameid)
 		if loc == nil {
 			continue
 		}
-		item := db.geonameLocToAutocomplete(geonameid, loc, city.String, country.String)
+		item := g.locToAutocomplete(geonameid, loc, city.String, country.String)
 		item.Score = score
 		out = append(out, item)
 	}
 	return out
 }
 
-// geonameLocToAutocomplete builds an autocomplete Item for one geoname FTS
+// locToAutocomplete builds an autocomplete Item for one geoname FTS
 // match. The FTS row supplies the id, the "city" used for the optional name
 // override, and the country fallback; everything else comes from the
 // resolved location.
-func (db *DB) geonameLocToAutocomplete(geonameid int, loc *Location, resCity, resCountry string) Item {
+func (g *geonames) locToAutocomplete(geonameid int, loc *Location, resCity, resCountry string) Item {
 	country := resCountry
 	if country == "" {
-		country = db.countryNames[loc.CC]
+		country = g.countryNames[loc.CC]
 	}
 	it := Item{
 		ID:         geonameid,

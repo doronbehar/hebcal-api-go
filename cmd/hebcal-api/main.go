@@ -91,6 +91,28 @@ func main() {
 		defer db.Close()
 	}
 
+	// geonames.sqlite3 is rebuilt weekly by an external job that finishes with
+	// an atomic rename, so the file is reopened in place when it changes rather
+	// than the server restarted. The check runs on a timer and on the reload
+	// signals below; either way it is a stat until the file actually differs.
+	reloadGeonames := func(why string) {
+		if db == nil {
+			return
+		}
+		if ok, err := db.ReloadGeonames(); err != nil {
+			lg.Warn("geonames reload failed (" + why + "), keeping the current database: " + err.Error())
+		} else if ok {
+			lg.Info("reopened " + cfg.GeonamesDB + " (" + why + ")")
+		}
+	}
+	if db != nil && cfg.GeonamesPoll > 0 {
+		go func() {
+			for range time.Tick(cfg.GeonamesPoll) {
+				reloadGeonames("poll")
+			}
+		}()
+	}
+
 	// Load the calendar fonts once, at startup: sfnt.Font is read-only after
 	// parsing, so every request shares them and only the per-document embedded
 	// instances are rebuilt. A failure is not fatal either -- the PDF routes
@@ -126,7 +148,8 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// SIGHUP or SIGUSR1 reopens the access log for logrotate
+	// SIGHUP or SIGUSR1 reopens the access log for logrotate, and checks the
+	// geonames database for replacement
 	rotate := make(chan os.Signal, 1)
 	signal.Notify(rotate, syscall.SIGHUP, syscall.SIGUSR1)
 	go func() {
@@ -136,6 +159,7 @@ func main() {
 			} else {
 				lg.Info("reopened access log on " + sig.String())
 			}
+			reloadGeonames(sig.String())
 		}
 	}()
 

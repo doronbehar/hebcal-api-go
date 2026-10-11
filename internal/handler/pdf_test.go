@@ -361,46 +361,32 @@ func TestPDFUnavailableWithoutFonts(t *testing.T) {
 	}
 }
 
-// bingbot fetches the /v4/ URLs it discovers with the path lowercased, which
-// survives base64-decode (the alphabet is case-sensitive but every character
-// in it still decodes to *something*) and then fails protobuf.Unmarshal on
-// the garbled bytes -- exactly the "protobuf: proto: cannot parse invalid
-// wire-format data" from a production access log. app-download.js answered
-// that one user agent 404 rather than 400 (see pdf.DecodeError); every other
-// requester with the same broken URL, and bingbot with a URL broken some
-// other way, keeps the ordinary 400.
-func TestPDFV4BingBotLowercased(t *testing.T) {
-	// A real /v4/ payload, lowercased the way bingbot's crawl does.
+// Several crawlers (bingbot among them) fetch the /v4/ URLs they discover with
+// the path lowercased, which survives base64-decode (the alphabet is
+// case-sensitive but every character in it still decodes to *something*) and
+// then fails protobuf.Unmarshal on the garbled bytes -- exactly the
+// "protobuf: proto: cannot parse invalid wire-format data" from a production
+// access log. An undecodable payload names no calendar, so it is 404 for every
+// user agent.
+func TestPDFV4Lowercased(t *testing.T) {
+	// A real /v4/ payload, lowercased the way those crawls do.
 	const path = "/v4/caeqargbiaeoatabqafqavj--iqbyoopebkiaqe/hebcal_2026_albury.pdf"
-	const bingUA = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; " +
-		"+http://www.bing.com/bingbot.htm) Chrome/116.0.1938.76 Safari/537.36"
 	_, srv := pdfServerNoFonts(t)
 
-	t.Run("bingbot gets 404", func(t *testing.T) {
-		resp, _ := get(t, srv, path, "User-Agent", bingUA)
+	for _, ua := range []string{
+		"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; " +
+			"+http://www.bing.com/bingbot.htm) Chrome/116.0.1938.76 Safari/537.36",
+		"Mozilla/5.0 (compatible; Googlebot/2.1)",
+		"",
+	} {
+		resp, _ := get(t, srv, path, "User-Agent", ua)
 		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("status = %d, want 404", resp.StatusCode)
+			t.Errorf("User-Agent %q: status = %d, want 404", ua, resp.StatusCode)
 		}
-	})
-
-	t.Run("anyone else still gets 400", func(t *testing.T) {
-		resp, _ := get(t, srv, path, "User-Agent", "Mozilla/5.0 (compatible; Googlebot/2.1)")
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Errorf("status = %d, want 400", resp.StatusCode)
+		if cc := resp.Header.Get("Cache-Control"); cc != "" {
+			t.Errorf("User-Agent %q: Cache-Control = %q, want none on a 404", ua, cc)
 		}
-	})
-
-	t.Run("bingbot on an unrelated 404 stays 404 for the ordinary reason", func(t *testing.T) {
-		// A .pdf naming another kind of calendar (e.g. a v=2) is 404 through
-		// writeCommonPDFError before the decode-failure branch is ever
-		// reached; confirm the override doesn't need to fire for that.
-		resp, _ := get(t, srv, "/v2/y/"+strings.TrimRight(
-			base64.StdEncoding.EncodeToString([]byte("v=yahrzeit")), "=")+"/x.pdf",
-			"User-Agent", bingUA)
-		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("status = %d, want 404", resp.StatusCode)
-		}
-	})
+	}
 }
 
 // The legacy /v2/h/<base64-querystring>/<name>.pdf URLs, which production

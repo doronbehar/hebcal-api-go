@@ -145,8 +145,9 @@ func fromLatLongLegacy(q url.Values, cityTypeahead string) (*geodb.Location, err
 		tzid = legacyTzToTzid(q.Get("tz"), q.Get("dst"))
 	}
 	if tzid == "" {
-		// A geo-tz shape lookup would go here, but that data is not available
-		// to this service, so a timezone is required.
+		tzid = TimezoneAt(latitude, longitude)
+	}
+	if tzid == "" {
 		return nil, model.BadRequest("Timezone required")
 	}
 	if _, err := zmanim.LoadLocation(tzid); err != nil {
@@ -216,13 +217,15 @@ func fromLatLong(q url.Values, cityTypeahead string) (*geodb.Location, error) {
 	if err != nil || math.IsNaN(longitude) || longitude > 180 || longitude < -180 {
 		return nil, model.BadRequest("Invalid longitude specified: %s", q.Get("longitude"))
 	}
-	if jsutil.QueryEmpty(q, "tzid") {
-		// A geo-tz shape guess would go here, but that dataset is not available
-		// to this service, so a timezone is required.
-		return nil, model.BadRequest("Timezone required")
-	}
 	il := q.Get("i") == "on"
 	tzid := q.Get("tzid")
+	if tzid == "" {
+		// No timezone given: look it up from the coordinates.
+		tzid = TimezoneAt(latitude, longitude)
+		if tzid == "" {
+			return nil, model.BadRequest("Timezone required")
+		}
+	}
 	if tzid == "Asia/Jerusalem" {
 		il = true
 	} else if tz0 := tzid[0]; tz0 == ' ' || tz0 == '-' || tz0 == '+' {
